@@ -18,7 +18,6 @@
 
 [comment]: <> (Any database, AWS or security dependencies)
 
-
 ## Checklist
 - [ ] My PR title follows the organization's standard format (`<type>: <desc> <id>`).
 - [ ] I have tested these changes beforehand.
