@@ -74,25 +74,12 @@ All Pull Request titles **must** follow the organization's standard format:
 - Use the format `<type>/<ticket-number>/<short-description>` (e.g., `feat/45010/add-profile-upload`).
 - The `<type>` should match the conventional commit types listed above.
 
-## ✅ Pull Request Checklist
-
-Before submitting your PR, ensure:
-
-- [ ] PR title follows the format `<type>: <desc> <id>`.
-- [ ] Changes have been tested.
-- [ ] A self-review of the code has been performed.
-- [ ] Relevant tickets and documentation are updated.
-- [ ] Hard-to-understand code is commented.
-- [ ] Changes follow repository established standards.
-- [ ] No new warnings are generated.
-- [ ] Reviewers have been assigned.
-
 ## 🔍 Code Review
 
-- All PRs require at least one approving review before merging.
+- All PRs require at least **3** approving reviews before merging.
 - Address review comments promptly.
 - Keep PRs focused — avoid mixing unrelated changes.
 
 ## 📬 Questions?
 
-If you have any questions, please reach out to the repository maintainers or open an issue.
+If you have any questions, please reach out to the [valvoline-qa/qa-tcoe](https://github.com/orgs/valvoline-qa/teams/qa-tcoe) team or open an issue.
