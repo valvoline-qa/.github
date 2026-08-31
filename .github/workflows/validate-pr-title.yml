@@ -68,7 +68,13 @@ jobs:
           # The payload fallback keeps a transient API problem from hard-blocking
           # merges, but it restores the stale-title behaviour, so make it loud
           # rather than silent.
-          if PR_TITLE="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json title --jq .title 2>/dev/null)"; then
+          if [ -z "$PR_NUMBER" ]; then
+            # No pull request in context, so there is nothing to look up. Use
+            # whatever the payload carried rather than calling the API with an
+            # empty number and reporting it as a permissions problem.
+            PR_TITLE="$PAYLOAD_TITLE"
+            TITLE_SOURCE="event payload (no pull request in context)"
+          elif PR_TITLE="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json title --jq .title 2>/dev/null)"; then
             TITLE_SOURCE="live API"
           else
             PR_TITLE="$PAYLOAD_TITLE"
