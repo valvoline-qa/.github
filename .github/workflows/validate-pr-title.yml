@@ -1,5 +1,17 @@
 name: Validate PR Title
 
+# SECURITY NOTES
+# - Trigger is `pull_request` (NOT `pull_request_target`). For PRs from forks this
+#   means the job runs WITHOUT access to repository secrets. Do not change this.
+# - No `actions/checkout` step: repository code is never fetched or executed here,
+#   so untrusted code from a fork PR cannot run on the runner.
+# - No third-party actions are used: no supply-chain exposure, nothing to pin.
+# - No secrets, tokens, or context values are echoed. On public repositories both
+#   the logs and the job summary are world-readable, so output is limited to the
+#   PR title (already public) plus static documentation.
+# - The PR title is read via `env:`, never interpolated with ${{ }} inside `run:`.
+#   Direct interpolation would allow shell injection from an attacker-controlled title.
+
 on:
   pull_request:
     types:
@@ -8,20 +20,36 @@ on:
       - synchronize
       - reopened
 
-permissions:
-  contents: read
+# No GITHUB_TOKEN scopes are needed: the job only reads the event payload.
+permissions: {}
 
 jobs:
   validate-pr-title:
     name: Check PR Title Format
-    runs-on: ubuntu-latest
+    runs-on: [ubuntu-latest]
+    timeout-minutes: 5
+    permissions: {}
 
     steps:
       - name: Validate PR title
+        shell: bash
         env:
+          # Untrusted, attacker-controllable input. Treated as data only.
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
-          echo "PR Title: '$PR_TITLE'"
+          set -uo pipefail
+
+          # ── Normalize (validation input) ───────────────────────────────
+          # Strip control characters, including newlines. Without this, a
+          # multi-line title such as "junk\nfeat: x AB#1" would pass, because
+          # grep matches line by line and only needs ONE line to match.
+          TITLE=$(printf '%s' "$PR_TITLE" | tr -d '\000-\037')
+
+          # ── Sanitize (display only) ────────────────────────────────────
+          # Neutralize characters that could break out of, or inject into, the
+          # Markdown job summary (backtick, pipe, backslash, angle brackets).
+          # Truncated to bound the output size.
+          SAFE_TITLE=$(printf '%s' "$TITLE" | sed 's/[`|\\<>]/ /g' | cut -c1-200)
 
           # Regex pattern:
           # ^(type)(optional scope): description AB#<number>$
@@ -32,7 +60,10 @@ jobs:
           # ticket  → AB# followed by one or more digits
           PATTERN='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-zA-Z0-9_-]+\))?: .+ AB#[0-9]+$'
 
-          if echo "$PR_TITLE" | grep -qE "$PATTERN"; then
+          # `printf '%s'` instead of `echo`: a title beginning with "-e" or "-n",
+          # or containing backslash escapes, would otherwise be consumed as an
+          # option or reinterpreted by echo, altering what actually gets matched.
+          if printf '%s' "$TITLE" | grep -qE "$PATTERN"; then
             VALID=true
           else
             VALID=false
@@ -45,14 +76,14 @@ jobs:
               echo ""
               echo "| | |"
               echo "|---|---|"
-              echo "| **Title** | \`$PR_TITLE\` |"
+              echo "| **Title** | \`$SAFE_TITLE\` |"
               echo "| **Result** | Matches the required format |"
             else
               echo "## ❌ PR Title Validation — Failed"
               echo ""
               echo "| | |"
               echo "|---|---|"
-              echo "| **Title** | \`$PR_TITLE\` |"
+              echo "| **Title** | \`$SAFE_TITLE\` |"
               echo "| **Result** | Does not match the required format |"
               echo ""
               echo "---"
@@ -101,11 +132,10 @@ jobs:
 
           # ── Exit ───────────────────────────────────────────────────────
           if [ "$VALID" = "false" ]; then
-            echo ""
-            echo "❌ PR title does NOT match the required format."
-            echo "   Title    : '$PR_TITLE'"
-            echo "   Expected : <type>[optional scope]: <description> AB#<ticket_id>"
+            printf '\n%s\n' "❌ PR title does NOT match the required format."
+            printf '%s\n' "   Title    : $SAFE_TITLE"
+            printf '%s\n' "   Expected : <type>[optional scope]: <description> AB#<ticket_id>"
             exit 1
-          else
-            echo "✅ PR title is valid!"
           fi
+
+          printf '%s\n' "✅ PR title is valid!"
