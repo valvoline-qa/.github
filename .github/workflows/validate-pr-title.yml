@@ -1,15 +1,48 @@
 name: Validate PR Title
 
 on:
+  # IMPORTANT: when this file is enforced through the organization ruleset
+  # (`pr_conventions` -> "workflows" rule), GitHub IGNORES the activity types
+  # below and only ever triggers on the DEFAULT pull_request types:
+  # opened, synchronize, reopened. Editing a title or toggling Draft/Ready
+  # will NOT start a new run. The list is still declared so the file behaves
+  # correctly when it runs as a normal workflow in this repository.
   pull_request:
     types:
       - opened
-      - edited
-      - synchronize
       - reopened
+      - edited              # title changed
+      - synchronize
+      - ready_for_review    # Draft -> Ready for review
+      - converted_to_draft  # Ready for review -> Draft
+
+  # Lets consuming repositories call this as a reusable workflow. A caller
+  # workflow's own `on:` activity types ARE respected, which is the only way
+  # to get automatic re-validation on `edited` / `ready_for_review`.
+  #
+  # IMPORTANT for callers: a called workflow cannot raise GITHUB_TOKEN
+  # permissions above what the caller grants, so the CALLER must itself set
+  #
+  #   permissions:
+  #     contents: read
+  #     pull-requests: read
+  #
+  # Without `pull-requests: read` the live title lookup below fails and the job
+  # falls back to the (stale) event payload, which is the very bug this file
+  # exists to avoid. The fallback logs a warning when that happens.
+  workflow_call:
 
 permissions:
   contents: read
+  pull-requests: read   # required to read the live PR title via the API
+
+# Only one validation per pull request at a time. Re-runs, rapid pushes and
+# repeated events supersede any run still in flight, so a single check remains
+# and the most recent title is always the one that decides the result.
+# Falls back to github.ref when there is no PR in context.
+concurrency:
+  group: validate-pr-title-${{ github.repository }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   validate-pr-title:
@@ -19,9 +52,41 @@ jobs:
     steps:
       - name: Validate PR title
         env:
-          PR_TITLE: ${{ github.event.pull_request.title }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PAYLOAD_TITLE: ${{ github.event.pull_request.title }}
         run: |
-          echo "PR Title: '$PR_TITLE'"
+          set -euo pipefail
+
+          # Read the CURRENT title from the API instead of trusting
+          # github.event.pull_request.title. The payload is frozen at the moment
+          # the event fired and is replayed unchanged when a run is re-run, so a
+          # payload-based check can never go green after the author fixes the
+          # title. Fetching live makes "Re-run jobs" a working remediation path.
+          #
+          # The payload fallback keeps a transient API problem from hard-blocking
+          # merges, but it restores the stale-title behaviour, so make it loud
+          # rather than silent.
+          if [ -z "$PR_NUMBER" ]; then
+            # No pull request in context, so there is nothing to look up. Use
+            # whatever the payload carried rather than calling the API with an
+            # empty number and reporting it as a permissions problem.
+            PR_TITLE="$PAYLOAD_TITLE"
+            TITLE_SOURCE="event payload (no pull request in context)"
+          elif PR_TITLE="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json title --jq .title 2>/dev/null)"; then
+            TITLE_SOURCE="live API"
+          else
+            PR_TITLE="$PAYLOAD_TITLE"
+            TITLE_SOURCE="event payload (STALE - not refreshed by re-runs)"
+            echo "::warning title=PR title read from stale payload::Could not read the PR title via the API, so the event payload was used instead. A title corrected after this event will NOT be seen, even on re-run. If this workflow was invoked via workflow_call, the CALLER must grant 'permissions: pull-requests: read' - a called workflow cannot raise token permissions above what the caller grants."
+          fi
+
+          # Ignore leading/trailing whitespace, which is easy to introduce when
+          # editing a title in the GitHub UI and is not a real convention breach.
+          PR_TITLE="$(echo "$PR_TITLE" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+
+          echo "PR Title: '$PR_TITLE'  (source: $TITLE_SOURCE)"
 
           # Regex pattern:
           # ^(type)(optional scope): description AB#<number>$
@@ -50,5 +115,11 @@ jobs:
             echo "  chore(deps): update packages AB#99"
             echo ""
             echo "Your title: '$PR_TITLE'"
+            echo ""
+            echo "After correcting the title, this check does NOT re-run by itself."
+            echo "Re-trigger it with ONE of:"
+            echo "  • Actions tab → this run → 'Re-run jobs' (now re-reads the live title)"
+            echo "  • push any commit to the PR branch"
+            echo "  • close and reopen the PR"
             exit 1
           fi
