@@ -1,0 +1,54 @@
+name: Validate PR Title
+
+on:
+  pull_request:
+    types:
+      - opened
+      - edited
+      - synchronize
+      - reopened
+
+permissions:
+  contents: read
+
+jobs:
+  validate-pr-title:
+    name: Check PR Title Format
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Validate PR title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          echo "PR Title: '$PR_TITLE'"
+
+          # Regex pattern:
+          # ^(type)(optional scope): description AB#<number>$
+          #
+          # type    → feat | fix | docs | style | refactor | perf | test | build | ci | chore | revert
+          # scope   → optional, alphanumeric, underscores + hyphens, wrapped in parentheses
+          # desc    → any non-empty text
+          # ticket  → AB# followed by one or more digits
+          PATTERN='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-zA-Z0-9_-]+\))?: .+ AB#[0-9]+$'
+
+          if echo "$PR_TITLE" | grep -qE "$PATTERN"; then
+            echo "✅ PR title is valid!"
+          else
+            echo ""
+            echo "❌ PR title does NOT match the required format."
+            echo ""
+            echo "Required format:"
+            echo "  <type>[optional scope]: <description> AB#<ticket_id>"
+            echo ""
+            echo "Allowed types:"
+            echo "  feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert"
+            echo ""
+            echo "Examples:"
+            echo "  feat(auth): add OAuth login AB#1234"
+            echo "  fix: resolve null pointer on startup AB#567"
+            echo "  chore(deps): update packages AB#99"
+            echo ""
+            echo "Your title: '$PR_TITLE'"
+            exit 1
+          fi
