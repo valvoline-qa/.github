@@ -19,6 +19,17 @@ on:
   # Lets consuming repositories call this as a reusable workflow. A caller
   # workflow's own `on:` activity types ARE respected, which is the only way
   # to get automatic re-validation on `edited` / `ready_for_review`.
+  #
+  # IMPORTANT for callers: a called workflow cannot raise GITHUB_TOKEN
+  # permissions above what the caller grants, so the CALLER must itself set
+  #
+  #   permissions:
+  #     contents: read
+  #     pull-requests: read
+  #
+  # Without `pull-requests: read` the live title lookup below fails and the job
+  # falls back to the (stale) event payload, which is the very bug this file
+  # exists to avoid. The fallback logs a warning when that happens.
   workflow_call:
 
 permissions:
@@ -53,13 +64,23 @@ jobs:
           # the event fired and is replayed unchanged when a run is re-run, so a
           # payload-based check can never go green after the author fixes the
           # title. Fetching live makes "Re-run jobs" a working remediation path.
-          PR_TITLE="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json title --jq .title 2>/dev/null || echo "$PAYLOAD_TITLE")"
+          #
+          # The payload fallback keeps a transient API problem from hard-blocking
+          # merges, but it restores the stale-title behaviour, so make it loud
+          # rather than silent.
+          if PR_TITLE="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json title --jq .title 2>/dev/null)"; then
+            TITLE_SOURCE="live API"
+          else
+            PR_TITLE="$PAYLOAD_TITLE"
+            TITLE_SOURCE="event payload (STALE - not refreshed by re-runs)"
+            echo "::warning title=PR title read from stale payload::Could not read the PR title via the API, so the event payload was used instead. A title corrected after this event will NOT be seen, even on re-run. If this workflow was invoked via workflow_call, the CALLER must grant 'permissions: pull-requests: read' - a called workflow cannot raise token permissions above what the caller grants."
+          fi
 
           # Ignore leading/trailing whitespace, which is easy to introduce when
           # editing a title in the GitHub UI and is not a real convention breach.
           PR_TITLE="$(echo "$PR_TITLE" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
 
-          echo "PR Title: '$PR_TITLE'"
+          echo "PR Title: '$PR_TITLE'  (source: $TITLE_SOURCE)"
 
           # Regex pattern:
           # ^(type)(optional scope): description AB#<number>$
