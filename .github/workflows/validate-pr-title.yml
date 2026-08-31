@@ -88,6 +88,22 @@ jobs:
 
           echo "PR Title: '$PR_TITLE'  (source: $TITLE_SOURCE)"
 
+          # An empty title means no pull request context was available at all,
+          # rather than a badly formatted title. Still fail, so the gate can
+          # never be bypassed, but say what actually went wrong.
+          if [ -z "$PR_TITLE" ]; then
+            echo ""
+            echo "❌ Could not determine the pull request title, so there is nothing to validate."
+            echo ""
+            echo "Neither the API lookup nor the event payload supplied a title."
+            echo "This normally means the workflow ran without a pull request in context."
+            echo ""
+            echo "If it was invoked via workflow_call, remember that the github context"
+            echo "belongs to the CALLER: the caller must be triggered by 'pull_request'"
+            echo "and must grant 'permissions: pull-requests: read'."
+            exit 1
+          fi
+
           # Regex pattern:
           # ^(type)(optional scope): description AB#<number>$
           #
