@@ -1,5 +1,17 @@
 name: Validate PR Title
 
+# SECURITY NOTES
+# - Trigger is `pull_request` (NOT `pull_request_target`). For PRs from forks this
+#   means the job runs WITHOUT access to repository secrets. Do not change this.
+# - No `actions/checkout` step: repository code is never fetched or executed here,
+#   so untrusted code from a fork PR cannot run on the runner.
+# - No third-party actions are used: no supply-chain exposure, nothing to pin.
+# - No secrets, tokens, or context values are echoed. On public repositories both
+#   the logs and the job summary are world-readable, so output is limited to the
+#   PR title (already public) plus static documentation.
+# - The PR title is read via `env:`, never interpolated with ${{ }} inside `run:`.
+#   Direct interpolation would allow shell injection from an attacker-controlled title.
+
 on:
   pull_request:
     types:
@@ -8,20 +20,37 @@ on:
       - synchronize
       - reopened
 
-permissions:
-  contents: read
+# No GITHUB_TOKEN scopes are needed: the job only reads the event payload.
+permissions: {}
 
 jobs:
   validate-pr-title:
     name: Check PR Title Format
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
 
     steps:
       - name: Validate PR title
+        shell: bash
         env:
+          # Untrusted, attacker-controllable input. Treated as data only.
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
-          echo "PR Title: '$PR_TITLE'"
+          set -uo pipefail
+
+          # ── Normalize (validation input) ───────────────────────────────
+          # Strip control characters, including newlines. Without this, a
+          # multi-line title such as "junk\nfeat: x AB#1" would pass, because
+          # grep matches line by line and only needs ONE line to match.
+          TITLE=$(printf '%s' "$PR_TITLE" | tr -d '\000-\037')
+
+          # ── Sanitize (display only) ────────────────────────────────────
+          # Neutralize characters that could break out of, or inject into, the
+          # Markdown job summary (backtick, pipe, backslash, angle brackets).
+          # Truncated to bound the output size.
+          SAFE_TITLE=$(printf '%s' "$TITLE" | sed 's/[`|\\<>]/ /g' | cut -c1-200)
+          [ -n "$SAFE_TITLE" ] || SAFE_TITLE="(empty title)"
 
           # Regex pattern:
           # ^(type)(optional scope): description AB#<number>$
@@ -32,23 +61,98 @@ jobs:
           # ticket  → AB# followed by one or more digits
           PATTERN='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-zA-Z0-9_-]+\))?: .+ AB#[0-9]+$'
 
-          if echo "$PR_TITLE" | grep -qE "$PATTERN"; then
-            echo "✅ PR title is valid!"
+          # `printf '%s'` instead of `echo`: a title beginning with "-e" or "-n",
+          # or containing backslash escapes, would otherwise be consumed as an
+          # option or reinterpreted by echo, altering what actually gets matched.
+          if printf '%s' "$TITLE" | grep -qE "$PATTERN"; then
+            VALID=true
           else
-            echo ""
-            echo "❌ PR title does NOT match the required format."
-            echo ""
-            echo "Required format:"
-            echo "  <type>[optional scope]: <description> AB#<ticket_id>"
-            echo ""
-            echo "Allowed types:"
-            echo "  feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert"
-            echo ""
-            echo "Examples:"
-            echo "  feat(auth): add OAuth login AB#1234"
-            echo "  fix: resolve null pointer on startup AB#567"
-            echo "  chore(deps): update packages AB#99"
-            echo ""
-            echo "Your title: '$PR_TITLE'"
+            VALID=false
+          fi
+
+          # ── Build the summary into a local file ────────────────────────
+          # Written to a file first, then flushed. This way the content always
+          # exists and can be mirrored to the logs even if the summary file is
+          # unavailable, instead of the output vanishing silently.
+          MD="$RUNNER_TEMP/pr-title-summary.md"
+          : > "$MD"
+
+          if [ "$VALID" = "true" ]; then
+            {
+              echo "## PR Title Validation — Passed"
+              echo ""
+              echo "| Field | Value |"
+              echo "| --- | --- |"
+              echo "| Title | \`$SAFE_TITLE\` |"
+              echo "| Result | Matches the required format |"
+            } >> "$MD"
+          else
+            {
+              echo "## PR Title Validation — Failed"
+              echo ""
+              echo "| Field | Value |"
+              echo "| --- | --- |"
+              echo "| Title | \`$SAFE_TITLE\` |"
+              echo "| Result | Does not match the required format |"
+              echo ""
+              echo "### Required format"
+              echo ""
+              echo "    <type>[optional scope]: <description> AB#<ticket_id>"
+              echo ""
+              echo "### Allowed types"
+              echo ""
+              echo "| Type | When to use |"
+              echo "| --- | --- |"
+              echo "| feat | New feature |"
+              echo "| fix | Bug fix |"
+              echo "| docs | Documentation only |"
+              echo "| style | Formatting, no behaviour change |"
+              echo "| refactor | Neither a fix nor a feature |"
+              echo "| perf | Performance improvement |"
+              echo "| test | Adding or fixing tests |"
+              echo "| build | Build system or dependencies |"
+              echo "| ci | CI/CD configuration |"
+              echo "| chore | Other changes outside src and test |"
+              echo "| revert | Reverts a previous commit |"
+              echo ""
+              echo "### Valid examples"
+              echo ""
+              echo "| Example | Notes |"
+              echo "| --- | --- |"
+              echo "| feat(auth): add OAuth login AB#1234 | With scope |"
+              echo "| fix: resolve null pointer on startup AB#567 | Without scope |"
+              echo "| chore(deps): update packages AB#99 | Dependency update |"
+              echo "| docs: update README with setup steps AB#300 | Documentation |"
+              echo ""
+              echo "### Invalid examples"
+              echo ""
+              echo "| Example | Problem |"
+              echo "| --- | --- |"
+              echo "| add login page AB#1234 | Missing type |"
+              echo "| feat: add login page | Missing Azure ticket (AB#) |"
+              echo "| feat: add login page #1234 | Wrong ticket prefix, must be AB# |"
+              echo "| Feat: add login page AB#1234 | Type must be lowercase |"
+            } >> "$MD"
+          fi
+
+          # ── Flush to the job summary ──────────────────────────────────
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+            if cat "$MD" >> "$GITHUB_STEP_SUMMARY"; then
+              echo "Job summary written ($(wc -c < "$MD") bytes)."
+            else
+              echo "WARNING: could not write to GITHUB_STEP_SUMMARY."
+            fi
+          else
+            echo "WARNING: GITHUB_STEP_SUMMARY is not set; summary not available."
+          fi
+
+          # ── Mirror to the logs ────────────────────────────────────────
+          # Guarantees the guidance is visible even when the summary is not.
+          echo "---------- validation report ----------"
+          cat "$MD"
+          echo "---------------------------------------"
+
+          # ── Exit ──────────────────────────────────────────────────────
+          if [ "$VALID" = "false" ]; then
             exit 1
           fi
